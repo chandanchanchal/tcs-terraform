@@ -1,74 +1,104 @@
+
+provider "google" {
+  project = var.project
+  region  = var.region
+}
+
 resource "google_compute_firewall" "firewall" {
-  name    = "forssh"
+  name    = "gritfy-firewall-externalssh"
   network = "default"
 
   allow {
     protocol = "tcp"
     ports    = ["22"]
   }
-  source_ranges = ["0.0.0.0/0"]
-  target_tags = ["externalssh"]
+
+  source_ranges = ["0.0.0.0/0"] # Not So Secure. Limit the Source Range
+  target_tags   = ["externalssh"]
 }
+
 resource "google_compute_firewall" "webserverrule" {
-  name    = "forweb"
+  name    = "gritfy-webserver"
   network = "default"
+
   allow {
     protocol = "tcp"
     ports    = ["80","443"]
   }
-  source_ranges = ["0.0.0.0/0"]
-  target_tags = ["webserver"]
+
+  source_ranges = ["0.0.0.0/0"] # Not So Secure. Limit the Source Range
+  target_tags   = ["webserver"]
 }
 
+# We create a public IP address for our google compute instance to utilize
 resource "google_compute_address" "static" {
   name = "vm-public-address"
-  project = "${var.project}"
-  region =  "${var.region}"
-  depends_on = [google_compute_firewall.firewall]
+  project = var.project
+  region = var.region
+  depends_on = [ google_compute_firewall.firewall ]
 }
 
-resource "google_compute_instance" "test" {
-  name         = "devserver"
-  machine_type = "n1-standard-1"
-  zone         = "${var.az_value}"
-  # tags = local.common_tags
 
+resource "google_compute_instance" "dev" {
+  name         = "devserver" # name of the server
+  machine_type = "f1-micro" # machine type refer google machine types
+  zone         = "${var.region}-a" # `a` zone of the selected region in our case us-central-1a
+  tags         = ["externalssh","webserver"] # selecting the vm instances with tags
+
+  # to create a startup disk with an Image/ISO. 
+  # here we are choosing the CentOS7 image
   boot_disk {
     initialize_params {
-      image = lookup(var.gvmtype, var.az_value)
+      image = "centos-cloud/centos-7"
     }
   }
 
+  # We can create our own network or use the default one like we did here
   network_interface {
-    # A default network is created for all GCP projects
     network = "default"
+
+    # assigning the reserved public IP to this instance
     access_config {
       nat_ip = google_compute_address.static.address
     }
   }
-provisioner "remote-exec" {
 
-  connection {
-   host = "google_compute_address.static.address"
-   type = "ssh"
-   user = "${var.user}"
-   timeout = "100s"
-   private_key = file("${var.privatekeypath}")
+  # This is copy the the SSH public Key to enable the SSH Key based authentication
+  metadata = {
+    ssh-keys = file("~/.ssh/id_rsa.pub")
   }
-  inline = [
-    "sudo yum -y install httpd"
-    "sudo service httpd start"
-  ]
+
+  # to connect to the instance after the creation and execute few commands for provisioning
+  # here you can execute a custom Shell script or Ansible playbook
+  provisioner "remote-exec" {
+    connection {
+      host        = google_compute_address.static.address
+      type        = "ssh"
+      # username of the instance would vary for each account refer the OS Login in GCP documentation
+      user        = var.user
+      timeout     = "500s"
+      # private_key being used to connect to the VM. ( the public key was copied earlier using metadata )
+      private_key = file("~/.ssh/id_rsa")
+    }
+
+    # Commands to be executed as the instance gets ready.
+    # installing nginx
+    inline = [
+      "sudo yum -y install epel-release",
+      "sudo yum -y install nginx",
+      "sudo nginx -v",
+    ]
+  }
+
+  # Ensure firewall rule is provisioned before server, so that SSH doesn't fail.
+  depends_on = [ google_compute_firewall.firewall, google_compute_firewall.webserverrule ]
+
+  # Defining what service account should be used for creating the VM
+  service_account {
+    email  = var.email
+    scopes = ["compute-ro"]
+  }
+
+
 }
 
-depends_on = [google_compute_firewall.firewall , google_compute_firewall.webserverrule]
-
-service_account{
-  email = "${var.email}"
-  scope = ["compute-ro"]
-}
-
-metadata = {
-
-  ssh_keys = "${var.user}:${var.publickeypath}"
-}
